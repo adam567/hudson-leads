@@ -244,7 +244,7 @@ def upsert_households(parcels: list[dict]) -> None:
             "surname_key": primary["last"] or "",
             "owner_names": owner_names,
             "target_zip": (p.get("situs_zip") in TARGET_ZIPS),
-            "owned_15_plus": (p.get("years_owned") or 0) >= MIN_YEARS_OWNED,
+            "owned_15_plus": (p.get("years_owned") or 0) >= 15,
         })
 
     inserted: list[dict] = []
