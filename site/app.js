@@ -36,6 +36,11 @@
     return;
   }
 
+  // Strip any stale #error=... fragment from a long-since-expired magic link.
+  if (location.hash && /error|access_token/.test(location.hash)) {
+    history.replaceState(null, "", location.pathname + location.search);
+  }
+
   const supabase = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY, {
     auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false }
   });
