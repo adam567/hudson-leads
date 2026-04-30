@@ -29,9 +29,8 @@ import requests
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 ORG_ID = os.environ.get("ORG_ID", "")
-FEATURE_SERVER = os.environ.get(
-    "FEATURE_SERVER",
-    "https://scgis.summitoh.net/hosted/rest/services/parcels_web_GEODATA_Tax_Parcels/FeatureServer/0",
+FEATURE_SERVER = (os.environ.get("FEATURE_SERVER") or
+    "https://scgis.summitoh.net/hosted/rest/services/parcels_web_GEODATA_Tax_Parcels/FeatureServer/0"
 ).rstrip("/")
 TARGET_ZIPS = [z.strip() for z in os.environ.get("TARGET_ZIPS", "44236").split(",") if z.strip()]
 TARGET_CITY = os.environ.get("TARGET_CITY", "HUDSON").upper()
