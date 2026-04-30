@@ -1,0 +1,59 @@
+name: Deploy Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - '.github/workflows/deploy-pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - name: Inject runtime config
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          if [ -n "$SUPABASE_URL" ] && [ -n "$SUPABASE_ANON_KEY" ]; then
+            cat > site/config.js <<EOF
+          window.HUDSON_LEADS_CONFIG = {
+            SUPABASE_URL: "$SUPABASE_URL",
+            SUPABASE_ANON_KEY: "$SUPABASE_ANON_KEY"
+          };
+          EOF
+            echo "Injected Supabase config from secrets."
+          else
+            echo "No Supabase secrets set — site will show setup notice."
+          fi
+      - name: Add robots.txt
+        run: |
+          cat > site/robots.txt <<EOF
+          User-agent: *
+          Disallow: /
+          EOF
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
