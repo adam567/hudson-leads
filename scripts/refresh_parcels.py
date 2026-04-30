@@ -363,10 +363,22 @@ def call_rpc(name: str, payload: dict) -> Any:
 
 
 def delete_parcels_not_in(keep_ids: set[str]) -> int:
-    """Drop households+parcels for this org that aren't in the new keep set
-    (so absentee/sold/no-longer-matching properties leave the dashboard)."""
-    r = supabase_request("GET", f"/parcels?org_id=eq.{ORG_ID}&select=id,county_parcel_id")
-    existing = r.json()
+    """Drop parcels for this org that aren't in the new keep set."""
+    PAGE = 1000
+    offset = 0
+    existing: list[dict] = []
+    while True:
+        r = supabase_request(
+            "GET",
+            f"/parcels?org_id=eq.{ORG_ID}&select=id,county_parcel_id&limit={PAGE}&offset={offset}",
+        )
+        chunk = r.json()
+        if not chunk:
+            break
+        existing.extend(chunk)
+        if len(chunk) < PAGE:
+            break
+        offset += PAGE
     to_delete = [p["id"] for p in existing if p["county_parcel_id"] not in keep_ids]
     if not to_delete:
         return 0
