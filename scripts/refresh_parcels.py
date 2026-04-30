@@ -288,9 +288,13 @@ def upsert_households(parcels: list[dict]) -> None:
             })
 
     if owners:
-        # Wipe owners for these households then re-insert. Service-role bypasses RLS.
-        ids_csv = ",".join(parcel_hh_ids)
-        supabase_request("DELETE", f"/household_owners?household_id=in.({ids_csv})")
+        # Wipe owners for these households then re-insert. URL-length budget on
+        # PostgREST is ~8KB so we chunk the DELETE filter and the INSERTs.
+        DEL_CHUNK = 100
+        ids = list(parcel_hh_ids)
+        for i in range(0, len(ids), DEL_CHUNK):
+            ids_csv = ",".join(ids[i:i + DEL_CHUNK])
+            supabase_request("DELETE", f"/household_owners?household_id=in.({ids_csv})")
         for i in range(0, len(owners), BATCH):
             supabase_request(
                 "POST",
