@@ -4,11 +4,6 @@ on:
   schedule:
     - cron: '17 10 * * 1'   # Mondays 10:17 UTC = 6:17 AM ET (out of business hours)
   workflow_dispatch:
-    inputs:
-      seed_fallback:
-        description: 'Use seed data instead of remote scrape'
-        required: false
-        default: 'false'
 
 jobs:
   refresh:
@@ -27,7 +22,6 @@ jobs:
           ORG_ID: ${{ secrets.ORG_ID }}
           FEATURE_SERVER: ${{ secrets.FEATURE_SERVER }}
           TARGET_ZIPS: ${{ vars.TARGET_ZIPS || '44236' }}
+          TARGET_CITY: ${{ vars.TARGET_CITY || 'HUDSON' }}
           MIN_SQFT: ${{ vars.MIN_SQFT || '2800' }}
-          MIN_YEARS_OWNED: ${{ vars.MIN_YEARS_OWNED || '15' }}
-          SEED_FALLBACK: ${{ inputs.seed_fallback || (vars.SEED_FALLBACK || 'true') }}
         run: python scripts/refresh_parcels.py

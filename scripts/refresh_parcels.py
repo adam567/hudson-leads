@@ -1,33 +1,17 @@
 #!/usr/bin/env python3
-"""Refresh parcel data from a configurable ArcGIS REST FeatureServer.
+"""Refresh parcel data from the Summit County tax-parcels FeatureServer (or any
+ArcGIS REST FeatureServer of the same shape).
 
-Pulls Hudson-area (or any zip-filtered) parcels with the standard CAMA fields,
-applies the v0 filters (15+ yrs owned, 2800+ sqft, target zips), and upserts
-into Supabase via the service-role key.
+Defaults to the official Summit County Fiscal Office endpoint:
+    https://scgis.summitoh.net/hosted/rest/services/parcels_web_GEODATA_Tax_Parcels/FeatureServer/0
 
-Configuration (env vars):
-    SUPABASE_URL                Supabase project URL
-    SUPABASE_SERVICE_ROLE_KEY   Service role key (bypasses RLS)
-    ORG_ID                      uuid of the org to write into
-    FEATURE_SERVER              base FeatureServer/0 URL (no trailing /query)
-    TARGET_ZIPS                 comma-sep, e.g. "44236,44067"
-    ZIP_FIELD                   field name in source for zip       (default ZIPCODE)
-    ADDR_FIELD                  field name for situs address       (default SITUS_ADDR)
-    OWNER_FIELD                 field name for primary owner       (default OWNER)
-    OWNER2_FIELD                second owner field, optional
-    SQFT_FIELD                  finished area field                (default FIN_AREA)
-    VALUE_FIELD                 market value field                 (default TOT_MKT_VAL)
-    SALE_DATE_FIELD             last sale date field               (default SALEDATE)
-    SALE_PRICE_FIELD            last sale price field              (default SALEPRICE)
-    PARCEL_ID_FIELD             parcel id                          (default PARCEL_ID)
-    CITY_FIELD                  city                               (default SITUS_CITY)
-    MIN_SQFT                    default 2800
-    MIN_YEARS_OWNED             default 15
-    SEED_FALLBACK               "1" to load seed/seed_households.json instead of remote
+Override with FEATURE_SERVER env var. Field names map to Summit's CAMA schema
+by default; override individual *_FIELD env vars for other counties.
 
-If FEATURE_SERVER is unset OR SEED_FALLBACK=1, this script loads
-seed/seed_households.json — a clearly-labeled demo dataset — so the dashboard
-has something visible while the real source is being wired up.
+Note: the public REST layer exposes ownernme1, siteaddress, resflrarea,
+cntmarval, resyrblt — but NOT sale dates. Until the propertyaccess
+enrichment scraper is wired, years_owned is null and the scorer falls
+back to year_built as the tenure proxy. No synthetic data, ever.
 """
 from __future__ import annotations
 
@@ -42,29 +26,30 @@ from typing import Any, Iterable
 
 import requests
 
-ROOT = Path(__file__).resolve().parent.parent
-SEED_PATH = ROOT / "seed" / "seed_households.json"
-
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 ORG_ID = os.environ.get("ORG_ID", "")
-FEATURE_SERVER = os.environ.get("FEATURE_SERVER", "").rstrip("/")
+FEATURE_SERVER = os.environ.get(
+    "FEATURE_SERVER",
+    "https://scgis.summitoh.net/hosted/rest/services/parcels_web_GEODATA_Tax_Parcels/FeatureServer/0",
+).rstrip("/")
 TARGET_ZIPS = [z.strip() for z in os.environ.get("TARGET_ZIPS", "44236").split(",") if z.strip()]
-SEED_FALLBACK = os.environ.get("SEED_FALLBACK", "").lower() in ("1", "true", "yes")
+TARGET_CITY = os.environ.get("TARGET_CITY", "HUDSON").upper()
 MIN_SQFT = int(os.environ.get("MIN_SQFT", "2800"))
-MIN_YEARS_OWNED = int(os.environ.get("MIN_YEARS_OWNED", "15"))
 
+# Summit County field names by default.
 F = {
-    "zip":         os.environ.get("ZIP_FIELD", "ZIPCODE"),
-    "addr":        os.environ.get("ADDR_FIELD", "SITUS_ADDR"),
-    "city":        os.environ.get("CITY_FIELD", "SITUS_CITY"),
-    "owner":       os.environ.get("OWNER_FIELD", "OWNER"),
-    "owner2":      os.environ.get("OWNER2_FIELD", ""),
-    "sqft":        os.environ.get("SQFT_FIELD", "FIN_AREA"),
-    "value":       os.environ.get("VALUE_FIELD", "TOT_MKT_VAL"),
-    "sale_date":   os.environ.get("SALE_DATE_FIELD", "SALEDATE"),
-    "sale_price":  os.environ.get("SALE_PRICE_FIELD", "SALEPRICE"),
-    "parcel_id":   os.environ.get("PARCEL_ID_FIELD", "PARCEL_ID"),
+    "zip":         os.environ.get("ZIP_FIELD", "pstlzip5"),
+    "city":        os.environ.get("CITY_FIELD", "pstlcity"),
+    "addr":        os.environ.get("ADDR_FIELD", "siteaddress"),
+    "owner":       os.environ.get("OWNER_FIELD", "ownernme1"),
+    "owner2":      os.environ.get("OWNER2_FIELD", "ownernme2"),
+    "sqft":        os.environ.get("SQFT_FIELD", "resflrarea"),
+    "value":       os.environ.get("VALUE_FIELD", "cntmarval"),
+    "sale_date":   os.environ.get("SALE_DATE_FIELD", "lglstartdt"),
+    "year_built":  os.environ.get("YEAR_BUILT_FIELD", "resyrblt"),
+    "class":       os.environ.get("CLASS_FIELD", "classdscrp"),
+    "parcel_id":   os.environ.get("PARCEL_ID_FIELD", "parcelid"),
 }
 
 
@@ -92,23 +77,40 @@ def supabase_request(method: str, path: str, **kwargs) -> requests.Response:
     return r
 
 
+def polygon_centroid(geom: dict) -> tuple[float | None, float | None]:
+    """Compute centroid from a polygon's outer ring (good enough for a heatmap)."""
+    if not geom:
+        return None, None
+    rings = geom.get("rings") or []
+    if not rings:
+        return None, None
+    ring = rings[0]
+    if not ring:
+        return None, None
+    xs = [pt[0] for pt in ring]
+    ys = [pt[1] for pt in ring]
+    return sum(xs) / len(xs), sum(ys) / len(ys)
+
+
 def fetch_arcgis(zip_code: str) -> Iterable[dict]:
-    """Stream features from an ArcGIS FeatureServer/0 with paging."""
-    if not FEATURE_SERVER:
-        return []
-    out_fields = ",".join(v for v in [
-        F["parcel_id"], F["addr"], F["city"], F["zip"], F["owner"],
-        F["owner2"] or None, F["sqft"], F["value"], F["sale_date"], F["sale_price"],
-    ] if v)
-    where = f"{F['zip']}='{zip_code}' AND {F['sqft']}>={MIN_SQFT}"
+    out_fields = [v for v in [
+        F["parcel_id"], F["addr"], F["city"], F["zip"], F["owner"], F["owner2"],
+        F["sqft"], F["value"], F["sale_date"], F["year_built"], F["class"],
+    ] if v]
+
+    where = (
+        f"{F['zip']}='{zip_code}' AND "
+        f"{F['city']} LIKE '{TARGET_CITY}%' AND "
+        f"{F['sqft']}>={MIN_SQFT}"
+    )
     offset = 0
     page = 1000
-    seen = 0
     while True:
         params = {
             "where": where,
-            "outFields": out_fields,
-            "returnGeometry": "false",
+            "outFields": ",".join(out_fields),
+            "returnGeometry": "true",
+            "outSR": 4326,
             "f": "json",
             "resultOffset": offset,
             "resultRecordCount": page,
@@ -116,15 +118,20 @@ def fetch_arcgis(zip_code: str) -> Iterable[dict]:
         r = requests.get(f"{FEATURE_SERVER}/query", params=params, timeout=60)
         r.raise_for_status()
         data = r.json()
+        if "error" in data:
+            sys.exit(f"arcgis error: {data['error']}")
         feats = data.get("features", []) or []
         if not feats:
             return
         for feat in feats:
-            yield feat.get("attributes", {})
-            seen += 1
-        if len(feats) < page or not data.get("exceededTransferLimit"):
+            attrs = dict(feat.get("attributes", {}))
+            lng, lat = polygon_centroid(feat.get("geometry"))
+            attrs["__lat"] = lat
+            attrs["__lng"] = lng
+            yield attrs
+        if not data.get("exceededTransferLimit") and len(feats) < page:
             return
-        offset += page
+        offset += len(feats)
         time.sleep(0.2)
 
 
@@ -174,9 +181,7 @@ def normalize_owner(name: str | None) -> dict:
 
 def to_row(attrs: dict) -> dict | None:
     sale = epoch_to_date(attrs.get(F["sale_date"]))
-    yrs = years_owned(sale)
-    if yrs is None or yrs < MIN_YEARS_OWNED:
-        return None
+    yrs = years_owned(sale)  # may be None — Summit's public layer doesn't carry sale date
     sqft = attrs.get(F["sqft"])
     if sqft is None or sqft < MIN_SQFT:
         return None
@@ -187,54 +192,47 @@ def to_row(attrs: dict) -> dict | None:
         "org_id": ORG_ID,
         "county_parcel_id": parcel_id,
         "county": "Summit",
-        "situs_address": attrs.get(F["addr"]),
-        "situs_city": attrs.get(F["city"]),
-        "situs_zip": attrs.get(F["zip"]),
+        "situs_address": (attrs.get(F["addr"]) or "").strip() or None,
+        "situs_city": (attrs.get(F["city"]) or "").title() or None,
+        "situs_zip": str(attrs.get(F["zip"]) or "")[:5] or None,
         "sqft": int(sqft),
         "market_value": float(attrs.get(F["value"]) or 0) or None,
         "last_sale_date": sale.isoformat() if sale else None,
-        "last_sale_price": float(attrs.get(F["sale_price"]) or 0) or None,
         "years_owned": yrs,
         "owner1_raw": attrs.get(F["owner"]),
-        "owner2_raw": attrs.get(F["owner2"]) if F["owner2"] else None,
+        "owner2_raw": attrs.get(F["owner2"]),
+        "year_built": attrs.get(F["year_built"]) or None,
+        "property_class": attrs.get(F["class"]) or None,
+        "lat": attrs.get("__lat"),
+        "lng": attrs.get("__lng"),
         "source": "arcgis",
-        "source_payload": attrs,
+        "source_payload": {k: v for k, v in attrs.items() if not k.startswith("__")},
         "refreshed_at": datetime.utcnow().isoformat() + "Z",
     }
-
-
-def load_seed_rows() -> list[dict]:
-    if not SEED_PATH.exists():
-        return []
-    with SEED_PATH.open() as f:
-        records = json.load(f)
-    rows: list[dict] = []
-    for rec in records:
-        rec = dict(rec)
-        rec["org_id"] = ORG_ID
-        rec.setdefault("source", "seed")
-        rec.setdefault("refreshed_at", datetime.utcnow().isoformat() + "Z")
-        rows.append(rec)
-    return rows
 
 
 def upsert_parcels(rows: list[dict]) -> list[dict]:
     if not rows:
         return []
-    r = supabase_request(
-        "POST",
-        "/parcels?on_conflict=org_id,county_parcel_id",
-        headers={"Prefer": "resolution=merge-duplicates,return=representation"},
-        data=json.dumps(rows),
-    )
-    return r.json()
+    BATCH = 500
+    out: list[dict] = []
+    for i in range(0, len(rows), BATCH):
+        batch = rows[i:i + BATCH]
+        r = supabase_request(
+            "POST",
+            "/parcels?on_conflict=org_id,county_parcel_id",
+            headers={"Prefer": "resolution=merge-duplicates,return=representation"},
+            data=json.dumps(batch),
+        )
+        out.extend(r.json())
+    return out
 
 
 def upsert_households(parcels: list[dict]) -> None:
     if not parcels:
         return
+    BATCH = 500
     households: list[dict] = []
-    owners: list[dict] = []
     for p in parcels:
         primary = normalize_owner(p.get("owner1_raw"))
         secondary = normalize_owner(p.get("owner2_raw"))
@@ -248,24 +246,29 @@ def upsert_households(parcels: list[dict]) -> None:
             "owner_names": owner_names,
             "target_zip": (p.get("situs_zip") in TARGET_ZIPS),
             "owned_15_plus": (p.get("years_owned") or 0) >= MIN_YEARS_OWNED,
-            "top_quartile_value": False,
         })
 
-    r = supabase_request(
-        "POST",
-        "/households?on_conflict=org_id,parcel_id",
-        headers={"Prefer": "resolution=merge-duplicates,return=representation"},
-        data=json.dumps(households),
-    )
-    inserted = r.json()
+    inserted: list[dict] = []
+    for i in range(0, len(households), BATCH):
+        batch = households[i:i + BATCH]
+        r = supabase_request(
+            "POST",
+            "/households?on_conflict=org_id,parcel_id",
+            headers={"Prefer": "resolution=merge-duplicates,return=representation"},
+            data=json.dumps(batch),
+        )
+        inserted.extend(r.json())
     by_parcel = {h["parcel_id"]: h["id"] for h in inserted}
 
+    owners: list[dict] = []
+    parcel_hh_ids = set()
     for p in parcels:
         primary = normalize_owner(p.get("owner1_raw"))
         secondary = normalize_owner(p.get("owner2_raw"))
         hh_id = by_parcel.get(p["id"])
         if not hh_id:
             continue
+        parcel_hh_ids.add(hh_id)
         if primary["raw"]:
             owners.append({
                 "household_id": hh_id,
@@ -286,16 +289,16 @@ def upsert_households(parcels: list[dict]) -> None:
             })
 
     if owners:
-        # Drop existing then re-insert (simpler than upsert since we don't have a stable PK on raw name).
-        # Per RLS, service-role bypasses; we scope by household_ids.
-        for hh_id in by_parcel.values():
-            supabase_request("DELETE", f"/household_owners?household_id=eq.{hh_id}")
-        supabase_request(
-            "POST",
-            "/household_owners",
-            headers={"Prefer": "return=minimal"},
-            data=json.dumps(owners),
-        )
+        # Wipe owners for these households then re-insert. Service-role bypasses RLS.
+        ids_csv = ",".join(parcel_hh_ids)
+        supabase_request("DELETE", f"/household_owners?household_id=in.({ids_csv})")
+        for i in range(0, len(owners), BATCH):
+            supabase_request(
+                "POST",
+                "/household_owners",
+                headers={"Prefer": "return=minimal"},
+                data=json.dumps(owners[i:i + BATCH]),
+            )
 
 
 def call_rpc(name: str, payload: dict) -> Any:
@@ -315,21 +318,18 @@ def main() -> None:
     supabase_required()
 
     rows: list[dict] = []
-    if SEED_FALLBACK or not FEATURE_SERVER:
-        print(f"[seed] loading from {SEED_PATH}")
-        rows = load_seed_rows()
-    else:
-        for zip_code in TARGET_ZIPS:
-            print(f"[arcgis] querying {FEATURE_SERVER} for zip {zip_code}")
-            for attrs in fetch_arcgis(zip_code):
-                row = to_row(attrs)
-                if row:
-                    rows.append(row)
-        print(f"[arcgis] {len(rows)} parcels passed filters")
+    for zip_code in TARGET_ZIPS:
+        print(f"[arcgis] {FEATURE_SERVER} where zip={zip_code} city LIKE {TARGET_CITY}%")
+        count = 0
+        for attrs in fetch_arcgis(zip_code):
+            row = to_row(attrs)
+            if row:
+                rows.append(row)
+                count += 1
+        print(f"[arcgis] {count} parcels passed filters for {zip_code}")
 
     if not rows:
-        print("no parcels to write")
-        return
+        sys.exit("no parcels returned — refusing to write empty dataset; check FEATURE_SERVER + filters")
 
     upserted = upsert_parcels(rows)
     print(f"[supabase] upserted {len(upserted)} parcels")
