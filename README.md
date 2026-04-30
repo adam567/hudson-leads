@@ -1,62 +1,68 @@
 # hudson-leads
 
-Empty-nester / senior-parent lead-gen dashboard for a single Hudson, Ohio realtor.
+A property-prospecting dashboard for a single Hudson, Ohio realtor. Ranked list of long-tenured, owner-occupied Hudson homes worth a personal touch.
 
 **Live:** <https://adam567.github.io/hudson-leads/>
-**Strategy memo (encrypted):** <https://adam567.github.io/hudson-strategy/>
+**Strategy memo:** <https://adam567.github.io/hudson-strategy/>
 
-**Stack:** GitHub Pages (frontend) + Supabase (Postgres + Auth + RLS) + GitHub Actions (cron). No build step. Solo-maintainable. Real data only — no synthetic seed.
+## What this is — and what it isn't
 
-## Data sources
+It is **not** an empty-nester or "graduating senior parents" finder. After two rounds of peer review, that hypothesis turned out to be unbuildable on free data:
+- School sites publish senior logistics and academic honors but not stable, machine-usable parent-linked senior rosters.
+- Scraping minors' names to match against property records is a privacy / ToS minefield.
+- The signal that *would* work — household composition with child-age bands — sits behind paid demographic vendors (Melissa, First American DataTree, Caldwell List) at low hundreds of dollars per pull. Until that's bought, senior targeting is not a thing this app can honestly do.
 
-| Layer | Source | Status |
-|---|---|---|
-| Parcels (owner, address, sqft, value, year-built, lat/lng) | Summit County Fiscal Office ArcGIS REST: [`parcels_web_GEODATA_Tax_Parcels/FeatureServer/0`](https://scgis.summitoh.net/hosted/rest/services/parcels_web_GEODATA_Tax_Parcels/FeatureServer/0) | Live, weekly refresh |
-| Sale-history / years-owned | propertyaccess.summitoh.net (per-parcel HTML) | Stubbed (`scripts/enrich_sales.py`) — needs the disclaimer-session dance and HTML parser implemented before it's active |
-| Senior confirmation | Realtor pastes names from school PDFs (NHS, college signing day, banquets) | Live; pg_trgm fuzzy-matched against owner surnames |
+It **is** a ranked list of likely-established homeowners in the Hudson 44236 service area, scored on signals we can verify from public records:
+
+- **Years owned** — derived from Summit County's `SC706_SALES.zip` bulk-data download (977K sale-transfer records, refreshed daily by the county). Joined to parcels by ID.
+- **Market value** — current CAMA market value from the parcel REST.
+- **Square footage** — residential floor area.
+- **Year built** — supplemental signal for tenure where sale-date is missing.
+- **Owner-occupied** — parcels where situs address ≠ mailing address (absentee landlords, LLC rentals, out-of-state owners) are dropped.
+
+Tier A = score ≥ 70 (long-tenured, top-quartile value, large home). Tier B = 45–69. Tier C = under 45. Today's universe: **2,698 owner-occupied Hudson 44236 homes ≥ 2,800 sqft, ~187 Tier A, ~1,228 Tier B**.
+
+## Stack
+
+GitHub Pages (frontend) + Supabase (Postgres + Auth + RLS) + GitHub Actions cron. No build step. Solo-maintainable. $0/mo.
 
 ## Layout
 
 ```
-site/                       static frontend, deployed to Pages
-  index.html                table + map + dossier drawer + senior-paste modal
-  app.js                    auth, list, map (Leaflet+heat), CSV export, keyboard shortcuts
+site/                       static frontend
+  index.html                table + map + dossier drawer
+  app.js                    auth, list, map, CSV export, keyboard shortcuts
   styles.css
-  config.js                 injected at build time from repo secrets
+  config.js                 injected at deploy time from GH secrets
 
 scripts/
-  refresh_parcels.py        weekly ArcGIS REST scraper, real data only
-  enrich_sales.py           per-parcel sale-history enrichment (stub)
+  refresh_parcels.py        weekly: ArcGIS REST + SC706_SALES.zip + owner-occupied filter
+  enrich_sales.py           (deprecated; SC706 covers it)
   requirements.txt
 
 supabase/migrations/
-  20260430_001_schema.sql      tables, indexes, pg_trgm
-  20260430_002_rls.sql         org-scoped RLS on every user-facing table
-  20260430_003_scoring.sql     window multiplier + fuzzy matcher + initial scoring fn
-  20260430_004_extras.sql      lat/lng, year_built, last_touched, dashboard view
-  20260430_005_rescore.sql     scoring updated for null years_owned (year_built fallback)
+  20260430_001_schema.sql        tables, indexes, pg_trgm
+  20260430_002_rls.sql           org-scoped RLS
+  20260430_003_scoring.sql       (superseded; senior matching + window mult — kept for history)
+  20260430_004_extras.sql        lat/lng, year_built, last_touched, dashboard view
+  20260430_005_rescore.sql       (superseded by 006)
+  20260430_006_property_only.sql current scoring + dashboard view, no senior
 
 .github/workflows/
-  deploy-pages.yml             ships site/ to Pages on push, injects Supabase config
-  refresh-data.yml             weekly scraper + manual dispatch
-  deploy-db.yml                pushes migrations to Supabase
+  deploy-pages.yml          ships site/ to Pages on push, injects Supabase config
+  refresh-data.yml          weekly Mondays 6:17 AM ET + manual dispatch
+  deploy-db.yml             pushes migrations to Supabase
 ```
 
-## Frontend features
+## Frontend
 
-- **Email-OTP login** via Supabase Auth (no passwords, no magic links)
-- **Ranked table view:** tier (A/B/C), score, owner, address, years owned, value, senior confirmed, status, last touched
-- **Map view:** Leaflet + OSM tiles + heatmap of A/B households, weighted by tier; clickable markers open the dossier
-- **Dossier drawer:** facts, score breakdown bars, owners list, status workflow, free-text notes
-- **CSV export:** one click, downloads visible rows with all columns for mail-merge / direct mail
-- **Senior confirmation:** paste names from a school PDF, fuzzy-match against owners (pg_trgm, ≥0.45 threshold), auto-promote matched households to top tier, recompute scores
-- **Window pill** in the header: tells the realtor where today falls (silent-house / planning / reactivation / avoid / off-window) — the scoring multiplier reflects the same calendar
-- **Keyboard shortcuts** in the dossier drawer:
-  - `j` — advance status (new → reviewing → contacted → paused → won → dropped)
-  - `k` — regress status
-  - `n` — focus the notes field
-  - `esc` — close
+- **Email-OTP login** via Supabase Auth
+- **Ranked table:** tier, score, owner, address, years owned, value, sqft, status, last touched. Click any column to sort. Click any row → dossier drawer.
+- **Map view:** Leaflet + OSM tiles + tier-weighted heatmap, clickable markers
+- **Dossier drawer:** facts (years owned, last sale, value, sqft, year built, owner-occupied?), score breakdown bars, owners list, status workflow, free-text notes
+- **CSV export:** one click, all visible rows with all columns, ready for mail-merge
+- **Filters:** tier, status, min-years-owned, free-text owner/address search
+- **Top 50 button:** one-click filter to the highest-scoring fifty
+- **Keyboard shortcuts in the dossier drawer:** `j` advance status, `k` regress, `n` notes, `esc` close
 
-## See `SETUP.md`
-
-For the 10-minute Supabase provisioning steps, repo secrets, and how to fire the first scraper run.
+See `SETUP.md` for the 10-minute Supabase provisioning steps.
