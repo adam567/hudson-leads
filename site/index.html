@@ -13,7 +13,7 @@
 
 <header id="topbar" hidden>
   <div class="brand">Hudson Leads</div>
-  <div class="window-pill" id="windowPill">—</div>
+  <div class="muted small" id="subtitle">Long-tenured owner-occupied homes in Hudson 44236</div>
   <div class="grow"></div>
   <div class="viewswitch">
     <button class="btn ghost active" data-view="table" id="vTable">Table</button>
@@ -49,6 +49,10 @@
 <!-- Dashboard -->
 <section id="appView" hidden>
 
+  <div class="card honest-banner">
+    <strong>What this is.</strong> A ranked list of long-tenured, owner-occupied Hudson homes — built from Summit County's public parcel and sale-transfer records. There is no "graduating senior" signal here; that requires paid household data we haven't bought yet. <strong>Best 50 candidates are at the top.</strong> Pick a few each week and send a personal note.
+  </div>
+
   <div class="toolbar card">
     <div class="filters">
       <label class="filter">
@@ -73,11 +77,14 @@
         </select>
       </label>
       <label class="filter">
-        <span>Senior confirmed</span>
-        <select id="filterConfirmed">
-          <option value="">All</option>
-          <option value="yes">Yes</option>
-          <option value="no">No</option>
+        <span>Min years owned</span>
+        <select id="filterTenure">
+          <option value="0">Any</option>
+          <option value="10">10+</option>
+          <option value="15" selected>15+</option>
+          <option value="20">20+</option>
+          <option value="25">25+</option>
+          <option value="30">30+</option>
         </select>
       </label>
       <label class="filter grow">
@@ -87,7 +94,7 @@
     </div>
     <div class="actions">
       <button class="btn" id="exportCsvBtn" title="Download visible rows as CSV">Export CSV</button>
-      <button class="btn" id="openConfirmBtn">Confirm seniors…</button>
+      <button class="btn" id="topNBtn" title="Show top 50 only">Top 50</button>
     </div>
   </div>
 
@@ -104,7 +111,7 @@
           <th data-sort="situs_address">Address</th>
           <th data-sort="years_owned">Yrs owned</th>
           <th data-sort="market_value">Value</th>
-          <th data-sort="senior_confirmed">Senior</th>
+          <th data-sort="sqft">Sqft</th>
           <th data-sort="status">Status</th>
           <th data-sort="last_touched_at">Last touched</th>
         </tr>
@@ -121,7 +128,6 @@
       <span><i class="dot tier-A"></i> Tier A</span>
       <span><i class="dot tier-B"></i> Tier B</span>
       <span><i class="dot tier-C"></i> Tier C</span>
-      <span><i class="dot confirmed"></i> Senior confirmed</span>
     </div>
   </div>
 
@@ -144,36 +150,6 @@
     <kbd>j</kbd> advance status · <kbd>k</kbd> regress · <kbd>n</kbd> notes · <kbd>esc</kbd> close
   </div>
 </aside>
-
-<!-- Senior confirmation modal -->
-<div id="confirmModal" class="modal" hidden>
-  <div class="modal-card">
-    <h2>Confirm graduating seniors</h2>
-    <p class="muted">Paste names from a school PDF — NHS list, college signing day, senior banquet, awards. One per line. The app will fuzzy-match against the homeowners we already have.</p>
-    <p class="muted small">Format suggestions (any of these work): <code>Smith, Emma</code> · <code>Emma Smith</code> · <code>Emma Smith — daughter of John and Mary Smith</code></p>
-    <label for="seniorPaste">Names</label>
-    <textarea id="seniorPaste" rows="10" placeholder="Reynolds, Emma&#10;Patel, Aarav&#10;Walker, Caroline"></textarea>
-    <div class="modal-row">
-      <label class="filter">
-        <span>School</span>
-        <input id="seniorSchool" type="text" placeholder="Hudson High School">
-      </label>
-      <label class="filter">
-        <span>Grad year</span>
-        <input id="seniorGradYear" type="number" min="2024" max="2030" value="2026">
-      </label>
-      <label class="filter">
-        <span>Source label</span>
-        <input id="seniorSource" type="text" placeholder="e.g. NHS induction May 2026">
-      </label>
-    </div>
-    <div class="modal-actions">
-      <button class="btn ghost" id="cancelConfirm">Cancel</button>
-      <button class="btn primary" id="submitConfirm">Process &amp; match</button>
-    </div>
-    <div class="err" id="confirmErr"></div>
-  </div>
-</div>
 
 <div id="toast" class="toast" hidden></div>
 

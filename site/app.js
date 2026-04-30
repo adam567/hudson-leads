@@ -1,10 +1,10 @@
-// Hudson Leads — frontend logic. Vanilla JS + supabase-js + Leaflet.
+// Hudson Leads — frontend. Property-prospecting only.
+// Vanilla JS + supabase-js + Leaflet. No build step.
 
 (() => {
   const cfg = window.HUDSON_LEADS_CONFIG || {};
   const NEEDS_SETUP = !cfg.SUPABASE_URL || cfg.SUPABASE_URL.includes("YOUR-PROJECT") || !cfg.SUPABASE_ANON_KEY || cfg.SUPABASE_ANON_KEY === "YOUR_ANON_KEY";
 
-  // ── Tiny DOM helpers ──────────────────────────────────────────────────
   const $ = (sel) => document.querySelector(sel);
   const $$ = (sel) => Array.from(document.querySelectorAll(sel));
   const fmt$ = (n) => n == null ? "—" : "$" + Math.round(n).toLocaleString();
@@ -31,8 +31,7 @@
     document.body.innerHTML = `
       <main style="max-width:600px;margin:60px auto;padding:24px;background:#fff;border:1px solid #e6e2d8;border-radius:8px;font:15px/1.5 -apple-system,system-ui,sans-serif">
         <h1 style="margin:0 0 12px">Setup needed</h1>
-        <p>This deployment is missing its Supabase credentials. Set the <code>SUPABASE_URL</code> and <code>SUPABASE_ANON_KEY</code> repository secrets and push, or edit <code>site/config.js</code> directly.</p>
-        <p>See <code>SETUP.md</code> in the repo for the 10-minute provisioning steps.</p>
+        <p>This deployment is missing its Supabase credentials. See <code>SETUP.md</code>.</p>
       </main>`;
     return;
   }
@@ -43,7 +42,6 @@
 
   const STATUS_ORDER = ["new", "reviewing", "contacted", "paused", "won", "dropped"];
 
-  // ── Auth view ─────────────────────────────────────────────────────────
   const authView = $("#authView"), appView = $("#appView"), topbar = $("#topbar");
   const emailInput = $("#email"), otpInput = $("#otp"), authErr = $("#authErr");
 
@@ -51,13 +49,9 @@
     authErr.textContent = "";
     const email = emailInput.value.trim();
     if (!email) { authErr.textContent = "Enter your email."; return; }
-    const { error } = await supabase.auth.signInWithOtp({
-      email,
-      options: { shouldCreateUser: true }
-    });
+    const { error } = await supabase.auth.signInWithOtp({ email, options: { shouldCreateUser: true } });
     if (error) { authErr.textContent = error.message; return; }
-    $("#authStep1").hidden = true;
-    $("#authStep2").hidden = false;
+    $("#authStep1").hidden = true; $("#authStep2").hidden = false;
     setTimeout(() => otpInput.focus(), 50);
     toast("Check your inbox for a 6-digit code.");
   });
@@ -73,27 +67,25 @@
   });
 
   $("#restartBtn").addEventListener("click", () => {
-    $("#authStep1").hidden = false;
-    $("#authStep2").hidden = true;
-    otpInput.value = "";
-    authErr.textContent = "";
+    $("#authStep1").hidden = false; $("#authStep2").hidden = true;
+    otpInput.value = ""; authErr.textContent = "";
   });
 
   $("#signOutBtn").addEventListener("click", async () => {
-    await supabase.auth.signOut();
-    location.reload();
+    await supabase.auth.signOut(); location.reload();
   });
 
-  // ── App state ─────────────────────────────────────────────────────────
+  // ── State ─────────────────────────────────────────────────────────────
   let allRows = [];
   let view = [];
   let sortKey = "total_score";
   let sortDir = "desc";
+  let topN = null;  // null = no cap
   let currentDrawerId = null;
 
   const fTier = $("#filterTier"), fStatus = $("#filterStatus"),
-        fConf = $("#filterConfirmed"), fSearch = $("#filterSearch");
-  [fTier, fStatus, fConf].forEach(el => el.addEventListener("change", render));
+        fTenure = $("#filterTenure"), fSearch = $("#filterSearch");
+  [fTier, fStatus, fTenure].forEach(el => el.addEventListener("change", render));
   fSearch.addEventListener("input", () => { clearTimeout(render._d); render._d = setTimeout(render, 120); });
 
   $$("th[data-sort]").forEach(th => th.addEventListener("click", () => {
@@ -103,7 +95,6 @@
     render();
   }));
 
-  // ── View switcher ─────────────────────────────────────────────────────
   $("#vTable").addEventListener("click", () => switchView("table"));
   $("#vMap").addEventListener("click", () => switchView("map"));
   function switchView(v) {
@@ -114,15 +105,21 @@
     if (v === "map") drawMap();
   }
 
-  // ── CSV export ────────────────────────────────────────────────────────
+  $("#topNBtn").addEventListener("click", () => {
+    topN = topN === 50 ? null : 50;
+    $("#topNBtn").textContent = topN ? "Show all" : "Top 50";
+    render();
+  });
+
   $("#exportCsvBtn").addEventListener("click", () => {
     if (!view.length) { toast("Nothing to export."); return; }
     const cols = [
       ["tier", "Tier"], ["total_score", "Score"], ["display_name", "Owner"],
       ["owner_names", "All owners"], ["situs_address", "Address"],
       ["situs_city", "City"], ["situs_zip", "Zip"], ["years_owned", "Yrs owned"],
-      ["market_value", "Value"], ["sqft", "Sqft"], ["last_sale_date", "Last sale"],
-      ["senior_confirmed", "Senior"], ["senior_school", "School"],
+      ["last_sale_date", "Last sale"], ["last_sale_price", "Last sale $"],
+      ["market_value", "Value"], ["sqft", "Sqft"], ["year_built", "Built"],
+      ["mailing_same_as_situs", "Owner-occupied"],
       ["status", "Status"], ["notes", "Notes"], ["last_touched_at", "Last touched"]
     ];
     const escapeCsv = (v) => {
@@ -142,16 +139,13 @@
     toast(`Exported ${view.length} rows.`);
   });
 
-  // ── Boot ──────────────────────────────────────────────────────────────
   async function start() {
     const { data: { session } } = await supabase.auth.getSession();
     if (session) await onSignedIn();
   }
 
   async function onSignedIn() {
-    authView.hidden = true;
-    appView.hidden = false;
-    topbar.hidden = false;
+    authView.hidden = true; appView.hidden = false; topbar.hidden = false;
     const { data: { user } } = await supabase.auth.getUser();
     $("#userEmail").textContent = user?.email || "";
     await loadData();
@@ -161,29 +155,17 @@
     const { data, error } = await supabase.from("v_dashboard").select("*");
     if (error) { toast("Load failed: " + error.message); return; }
     allRows = data || [];
-    setWindowPill(allRows[0]?.current_window || "off-window");
     render();
   }
 
-  function setWindowPill(label) {
-    const pill = $("#windowPill");
-    pill.className = "window-pill";
-    if (label.startsWith("silent")) pill.classList.add("win-primary");
-    else if (label.startsWith("avoid")) pill.classList.add("win-avoid");
-    else if (label === "planning") pill.classList.add("win-planning");
-    else if (label === "reactivation") pill.classList.add("win-react");
-    pill.textContent = "Window: " + label;
-  }
-
-  // ── Render ────────────────────────────────────────────────────────────
   function render() {
-    const tier = fTier.value, status = fStatus.value, conf = fConf.value;
+    const tier = fTier.value, status = fStatus.value;
+    const minTen = parseInt(fTenure.value, 10) || 0;
     const q = fSearch.value.trim().toLowerCase();
     view = allRows.filter(r => {
       if (tier && r.tier !== tier) return false;
       if (status && r.status !== status) return false;
-      if (conf === "yes" && !r.senior_confirmed) return false;
-      if (conf === "no" && r.senior_confirmed) return false;
+      if (minTen && (r.years_owned || 0) < minTen) return false;
       if (q) {
         const hay = [r.display_name, r.situs_address, ...(r.owner_names || [])].filter(Boolean).join(" ").toLowerCase();
         if (!hay.includes(q)) return false;
@@ -191,6 +173,7 @@
       return true;
     });
     view.sort(cmp(sortKey, sortDir));
+    if (topN) view = view.slice(0, topN);
     drawTable();
     drawStats();
     if (!$("#mapView").hidden) drawMap();
@@ -205,8 +188,7 @@
     return (a, b) => {
       let x = a[k], y = b[k];
       if (k === "tier") { x = "ABC".indexOf(x ?? "C"); y = "ABC".indexOf(y ?? "C"); }
-      if (k === "senior_confirmed") { x = x ? 1 : 0; y = y ? 1 : 0; }
-      if (k === "last_touched_at") { x = x ? Date.parse(x) : 0; y = y ? Date.parse(y) : 0; }
+      if (k === "last_touched_at" || k === "last_sale_date") { x = x ? Date.parse(x) : 0; y = y ? Date.parse(y) : 0; }
       if (x == null && y == null) return 0;
       if (x == null) return 1;
       if (y == null) return -1;
@@ -216,14 +198,22 @@
   }
 
   function drawStats() {
+    const n = view.length;
     const tier = (t) => view.filter(r => r.tier === t).length;
-    const conf = view.filter(r => r.senior_confirmed).length;
+    const medTen = (() => {
+      const v = view.map(r => r.years_owned).filter(x => x != null).sort((a,b)=>a-b);
+      return v.length ? v[Math.floor(v.length/2)] : "—";
+    })();
+    const medVal = (() => {
+      const v = view.map(r => r.market_value).filter(x => x != null).sort((a,b)=>a-b);
+      return v.length ? fmt$(v[Math.floor(v.length/2)]) : "—";
+    })();
     const html = `
-      <div class="stat"><div class="label">Showing</div><div class="val">${view.length}</div></div>
+      <div class="stat"><div class="label">Showing</div><div class="val">${n}</div></div>
       <div class="stat"><div class="label">Tier A</div><div class="val">${tier("A")}</div></div>
       <div class="stat"><div class="label">Tier B</div><div class="val">${tier("B")}</div></div>
-      <div class="stat"><div class="label">Tier C</div><div class="val">${tier("C")}</div></div>
-      <div class="stat"><div class="label">Senior confirmed</div><div class="val">${conf}</div></div>
+      <div class="stat"><div class="label">Median yrs owned</div><div class="val">${medTen}</div></div>
+      <div class="stat"><div class="label">Median value</div><div class="val">${medVal}</div></div>
     `;
     $("#stats").innerHTML = html;
   }
@@ -238,9 +228,9 @@
         <td class="score">${r.total_score == null ? "—" : Math.round(r.total_score)}</td>
         <td>${escape(r.display_name || "—")}</td>
         <td class="muted">${escape(r.situs_address || "—")}</td>
-        <td>${r.years_owned ?? "—"}</td>
+        <td>${r.years_owned ?? "?"}</td>
         <td>${fmt$(r.market_value)}</td>
-        <td>${r.senior_confirmed ? `<span class="confirmed">${escape(r.senior_school || "yes")}</span>` : `<span class="unconfirmed">—</span>`}</td>
+        <td>${r.sqft ? r.sqft.toLocaleString() : "—"}</td>
         <td><span class="status-pill ${r.status}">${escape(r.status)}</span></td>
         <td class="muted small">${fmtAgo(r.last_touched_at)}</td>
       </tr>
@@ -275,14 +265,14 @@
 
     markerLayer = L.layerGroup().addTo(map);
     points.forEach(r => {
-      const cls = r.senior_confirmed ? "marker-confirmed" : `marker-tier-${r.tier || "C"}`;
+      const cls = `marker-tier-${r.tier || "C"}`;
       const icon = L.divIcon({ className: "lead-marker " + cls, iconSize: [12, 12] });
       const m = L.marker([r.lat, r.lng], { icon })
         .bindPopup(`
           <strong>${escape(r.display_name || "—")}</strong><br>
           ${escape(r.situs_address || "")}<br>
           Tier ${r.tier || "—"} · Score ${Math.round(r.total_score || 0)}<br>
-          ${r.senior_confirmed ? "<em>Senior confirmed</em><br>" : ""}
+          ${r.years_owned ?? "?"} yrs owned · ${fmt$(r.market_value)}<br>
           <a href="#" data-id="${r.household_id}" class="popup-open">Open dossier →</a>
         `);
       m.on("popupopen", (e) => {
@@ -311,21 +301,19 @@
     $("#dName").textContent = r.display_name || "Unknown owner";
     $("#dAddr").textContent = `${r.situs_address || "—"}, ${r.situs_city || ""} ${r.situs_zip || ""}`;
     const facts = [
-      ["Years owned", r.years_owned ?? "—"],
-      ["Market value", fmt$(r.market_value)],
+      ["Years owned", r.years_owned ?? "unknown"],
+      ["Last sale", fmtDate(r.last_sale_date) + (r.last_sale_price ? " · " + fmt$(r.last_sale_price) : "")],
+      ["Market value (current)", fmt$(r.market_value)],
       ["Sq ft", r.sqft ? r.sqft.toLocaleString() : "—"],
       ["Year built", r.year_built ?? "—"],
-      ["Last sale", fmtDate(r.last_sale_date)],
-      ["Senior", r.senior_confirmed ? `confirmed${r.senior_school ? " — " + r.senior_school : ""}` : "not confirmed"],
-      ["Last touched", fmtAgo(r.last_touched_at)],
-      ["Window today", r.current_window]
+      ["Owner-occupied?", r.mailing_same_as_situs ? "yes" : "no"],
+      ["Last touched", fmtAgo(r.last_touched_at)]
     ];
     const max = 100;
     const pct = (n) => Math.min(100, Math.max(0, Math.round((n / max) * 100)));
     const scoreBars = [
       ["Tenure", r.tenure_points],
-      ["Value", r.value_points],
-      ["Senior confirmation", r.confirmation_points]
+      ["Value", r.value_points]
     ];
     const ownerList = (r.owner_names || []).map(o => `<div class="muted small">${escape(o)}</div>`).join("");
     const html = `
@@ -344,25 +332,21 @@
           </div>
           <div class="v">${(v||0).toFixed(1)}</div>
         </div>`).join("")}
-      <div class="muted small" style="margin-top:6px">× window multiplier ${(r.window_multiplier ?? 1).toFixed(2)}</div>
 
       <div class="section-h">Status</div>
-      <div style="display:flex;gap:8px;align-items:center">
-        <select id="dStatus">
-          ${STATUS_ORDER.map(s =>
-            `<option value="${s}" ${s===r.status?"selected":""}>${s}</option>`).join("")}
-        </select>
-      </div>
+      <select id="dStatus">
+        ${STATUS_ORDER.map(s =>
+          `<option value="${s}" ${s===r.status?"selected":""}>${s}</option>`).join("")}
+      </select>
 
       <div class="section-h">Notes</div>
-      <textarea id="dNotes" rows="6" placeholder="Private notes — what you know about this household, last touch, follow-up plan...">${escape(r.notes || "")}</textarea>
+      <textarea id="dNotes" rows="6" placeholder="Private notes — what you know, last touch, follow-up plan...">${escape(r.notes || "")}</textarea>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px">
         <button class="btn primary" id="dSave">Save</button>
       </div>
     `;
     $("#drawerBody").innerHTML = html;
     drawer.hidden = false;
-
     $("#dStatus").addEventListener("change", () => saveDrawer());
     $("#dSave").addEventListener("click", () => saveDrawer(true));
   }
@@ -393,81 +377,21 @@
     const next = Math.max(0, Math.min(STATUS_ORDER.length - 1, cur + direction));
     if (next === cur) return;
     const newStatus = STATUS_ORDER[next];
-    const sel = $("#dStatus");
-    if (sel) sel.value = newStatus;
-    const { error } = await supabase
-      .from("households").update({ status: newStatus }).eq("id", r.household_id);
+    const sel = $("#dStatus"); if (sel) sel.value = newStatus;
+    const { error } = await supabase.from("households").update({ status: newStatus }).eq("id", r.household_id);
     if (error) { toast("Save failed: " + error.message); return; }
     r.status = newStatus; r.last_touched_at = new Date().toISOString();
     toast("Status → " + newStatus);
     render();
   }
 
-  // ── Keyboard shortcuts ────────────────────────────────────────────────
   document.addEventListener("keydown", (e) => {
     const inField = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
-    if (e.key === "Escape") {
-      if (!$("#confirmModal").hidden) { $("#confirmModal").hidden = true; return; }
-      if (!drawer.hidden) { closeDrawer(); return; }
-    }
+    if (e.key === "Escape" && !drawer.hidden) { closeDrawer(); return; }
     if (drawer.hidden || inField) return;
     if (e.key === "j") { e.preventDefault(); nudgeStatus(+1); }
     else if (e.key === "k") { e.preventDefault(); nudgeStatus(-1); }
     else if (e.key === "n") { e.preventDefault(); $("#dNotes")?.focus(); }
-  });
-
-  // ── Senior confirmation flow ──────────────────────────────────────────
-  $("#openConfirmBtn").addEventListener("click", () => $("#confirmModal").hidden = false);
-  $("#cancelConfirm").addEventListener("click", () => $("#confirmModal").hidden = true);
-
-  $("#submitConfirm").addEventListener("click", async () => {
-    const errEl = $("#confirmErr"); errEl.textContent = "";
-    const text = $("#seniorPaste").value;
-    const school = $("#seniorSchool").value.trim() || null;
-    const gradYear = parseInt($("#seniorGradYear").value, 10) || null;
-    const sourceLabel = $("#seniorSource").value.trim() || null;
-    const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-    if (!lines.length) { errEl.textContent = "Paste at least one name."; return; }
-
-    const { data: orgRow, error: orgErr } = await supabase.from("org_members")
-      .select("org_id").limit(1).maybeSingle();
-    if (orgErr || !orgRow) { errEl.textContent = "No org membership found. Run the seed step in SETUP.md."; return; }
-
-    const { data: { user } } = await supabase.auth.getUser();
-    const { data: batch, error: bErr } = await supabase.from("senior_batches")
-      .insert({ org_id: orgRow.org_id, uploaded_by: user.id, source_label: sourceLabel, grad_year: gradYear, raw_text: text })
-      .select().single();
-    if (bErr) { errEl.textContent = bErr.message; return; }
-
-    const seniors = lines.map(line => {
-      const norm = line.toUpperCase().replace(/\s+/g, " ").trim();
-      const parts = norm.includes(",") ? norm.split(",", 2).map(s => s.trim()) : null;
-      let last = null, first = null;
-      if (parts) { last = parts[0]; first = (parts[1] || "").split(/\s+/)[0] || null; }
-      else { const toks = norm.split(/\s+/); first = toks[0]; last = toks[toks.length - 1]; }
-      return {
-        org_id: orgRow.org_id,
-        batch_id: batch.id,
-        senior_name_raw: line,
-        senior_name_norm: norm,
-        first_name: first,
-        last_name: last,
-        school,
-        grad_year: gradYear,
-      };
-    });
-    const { error: sErr } = await supabase.from("confirmed_seniors").insert(seniors);
-    if (sErr) { errEl.textContent = sErr.message; return; }
-
-    const { data: matched, error: mErr } = await supabase.rpc("match_seniors", { target_org: orgRow.org_id });
-    if (mErr) { errEl.textContent = "Match failed: " + mErr.message; return; }
-    const { error: scErr } = await supabase.rpc("recompute_scores", { target_org: orgRow.org_id });
-    if (scErr) { errEl.textContent = "Score failed: " + scErr.message; return; }
-
-    $("#confirmModal").hidden = true;
-    $("#seniorPaste").value = "";
-    toast(`Processed ${seniors.length}, matched ${matched ?? 0}.`);
-    await loadData();
   });
 
   start();
